@@ -1,0 +1,27 @@
+node_modules/
+.next/
+out/
+build/
+coverage/
+.env
+.env.local
+.env.*.local
+.DS_Store
+*.log
+
+# Local secrets
+.env
+.env.*
+!.env.example
+
+# Generated files
+node_modules/
+.next/
+out/
+dist/
+coverage/
+.DS_Store
+*.log
+
+AGENTS.md
+*.tsbuildinfo
