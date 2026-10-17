@@ -1,21 +1,51 @@
 import OpenAI from "openai";
 import { NextResponse } from "next/server";
-import { demoExplanation, type Invoice, type Payment, type ReconciliationStatus } from "@/lib/reconcile";
+import { EXPENSE_CATEGORIES, formatNip, VAT_RATE_LABEL } from "@/lib/invoice";
+import { formatMoney } from "@/lib/money";
+import { demoExplanation, results, type BankPayment, type ReconciliationResult } from "@/lib/reconcile";
 import { emitPrismTrace } from "@/lib/prism";
 
 export const runtime = "nodejs";
 
-const fallback = (status: ReconciliationStatus, invoice: Invoice, payments: Payment[]) => {
-  const amount = (value: number) => new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(value);
-  if (status === "amount_mismatch") {
-    const p = payments[0];
-    const delta = (p?.amount ?? 0) - invoice.amount;
-    return `${invoice.id} needs review: the invoice is ${amount(invoice.amount)}, while ${p?.id ?? "the candidate payment"} is ${amount(p?.amount ?? 0)} (${amount(Math.abs(delta))} ${delta >= 0 ? "higher" : "lower"}). Compare tax, a credit note, or a duplicate charge before approving an adjustment. No payment or refund has been initiated.`;
-  }
-  if (status === "missing_payment") return `No matching payment was found for ${invoice.vendor} (${invoice.id}, ${amount(invoice.amount)}). Check pending payments, alternate vendor names, and whether the bank statement is complete. Do not mark the invoice paid without evidence.`;
-  if (status === "possible_duplicate") return `${payments.length} payments reference ${invoice.id}. Check both transactions against the bank and vendor ledger before requesting a recall or refund.`;
-  return `${invoice.id} is matched to the available bank evidence. Preserve the transaction reference for audit.`;
-};
+const describePayment = (p: BankPayment) => ({ id: p.id, bookedAt: p.bookedAt, amount: formatMoney(p.amountMinor, p.currency), counterparty: p.counterparty, reference: p.reference, account: p.account });
+
+/** Amounts are pre-formatted strings so the model never does arithmetic on them. */
+function modelInput(result: ReconciliationResult) {
+  const { invoice } = result;
+  const money = (minor: number) => formatMoney(minor, invoice.currency);
+  return {
+    task: "Explain one reconciliation result for a Polish sole proprietorship (JDG) and recommend safe next steps",
+    invoice: {
+      id: invoice.id,
+      number: invoice.number,
+      vendor: invoice.vendor,
+      vendorNip: invoice.vendorNip ? formatNip(invoice.vendorNip) : `none (foreign vendor, ${invoice.vendorCountry})`,
+      category: EXPENSE_CATEGORIES[invoice.category].label,
+      issuedAt: invoice.issuedAt,
+      dueAt: invoice.dueAt,
+      net: money(invoice.netMinor),
+      vat: money(invoice.vatMinor),
+      gross: money(invoice.grossMinor),
+      vatRateOnDocument: VAT_RATE_LABEL[invoice.vatRate]
+    },
+    status: result.status,
+    dueState: result.due.state,
+    daysPastDue: result.due.daysPastDue,
+    difference: money(result.deltaMinor),
+    reviewReasons: result.reviewReasons.map((r) => r.message),
+    linkedPayments: result.matchedPayments.map(describePayment),
+    otherCurrencyPayments: result.crossCurrencyPayments.map(describePayment),
+    deterministicSummary: demoExplanation(result)
+  };
+}
+
+const SYSTEM_PROMPT = [
+  "You are CloseMate, a cautious finance operations assistant for a Polish sole proprietorship (JDG). Reply in English.",
+  "Explain the supplied reconciliation result in 2-4 concise sentences. All amounts, statuses and due dates are deterministic inputs; do not recalculate, convert between currencies, or change them.",
+  "Distinguish facts from hypotheses. Never claim a payment happened. Never initiate or instruct automatic movement of money. Recommend human review for mismatches, missing payments, possible duplicates and items held for review.",
+  "Do not decide whether an expense or VAT is deductible, do not estimate tax liability, and do not claim any connection to KSeF or a tax authority; suggest confirming such questions with the accountant.",
+  "Use only the provided synthetic records."
+].join(" ");
 
 export async function POST(request: Request) {
   const started = Date.now();
@@ -25,18 +55,17 @@ export async function POST(request: Request) {
   } catch {
     return NextResponse.json({ error: "Request body must be JSON." }, { status: 400 });
   }
-  const invoice = body?.invoice as Invoice | undefined;
-  const payments = body?.payments as Payment[] | undefined;
-  const status = body?.status as ReconciliationStatus | undefined;
+  const invoiceId = typeof body?.invoiceId === "string" ? body.invoiceId : typeof body?.invoice?.id === "string" ? body.invoice.id : undefined;
   const sessionId = typeof body?.sessionId === "string" ? body.sessionId.slice(0, 120) : `closemate-${Date.now()}`;
 
-  if (!invoice || typeof invoice.id !== "string" || typeof invoice.vendor !== "string" || typeof invoice.amount !== "number" || !Array.isArray(payments) || !["matched", "amount_mismatch", "missing_payment", "possible_duplicate"].includes(status ?? "")) {
-    return NextResponse.json({ error: "Invalid invoice reconciliation payload." }, { status: 400 });
+  const result = invoiceId ? results.find((r) => r.invoice.id === invoiceId) : undefined;
+  if (!result) {
+    return NextResponse.json({ error: "Unknown invoice. Only the synthetic demo invoices can be analyzed." }, { status: 400 });
   }
-  const safePayments = payments.slice(0, 8).filter((p) => p && typeof p.id === "string" && typeof p.vendor === "string" && typeof p.amount === "number");
-  const fallbackText = fallback(status!, invoice, safePayments);
+
+  const fallbackText = demoExplanation(result);
   const model = process.env.NICRRON_MODEL || "nicrron/auto";
-  const input = JSON.stringify({ task: "Explain one reconciliation exception and recommend safe next steps", invoice, status, candidatePayments: safePayments });
+  const input = JSON.stringify(modelInput(result));
   let explanation = fallbackText;
   let mode: "nicrron" | "rules" = "rules";
 
@@ -52,10 +81,7 @@ export async function POST(request: Request) {
         model,
         temperature: 0.15,
         messages: [
-          {
-            role: "system",
-            content: "You are CloseMate, a cautious finance operations assistant. Explain the supplied reconciliation result in 2-4 concise sentences. All amounts and matching statuses are deterministic inputs; do not recalculate or change them. Distinguish facts from hypotheses. Never claim a payment happened. Never initiate or instruct automatic movement of money. Recommend human review for mismatches, missing payments, or possible duplicates. Use only the provided synthetic records."
-          },
+          { role: "system", content: SYSTEM_PROMPT },
           { role: "user", content: input }
         ]
       });
