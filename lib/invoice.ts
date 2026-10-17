@@ -1,3 +1,5 @@
+import type { Locale } from "./locale";
+import { intlLocale } from "./locale";
 import { formatMoney, isCurrency, isMinorUnits, percentOf, type Currency, type MinorUnits } from "./money";
 
 /**
@@ -78,6 +80,7 @@ export type ValidationIssueCode =
   | "non_positive_amount"
   | "vat_sum_mismatch"
   | "vat_rate_mismatch"
+  | "invalid_vat_rate"
   | "invalid_nip"
   | "missing_nip"
   | "invalid_date"
@@ -118,8 +121,8 @@ export function daysBetween(from: string, to: string): number {
   return Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000);
 }
 
-export function formatDate(value: string, style: "short" | "long" = "short"): string {
-  return new Intl.DateTimeFormat("en-US", {
+export function formatDate(value: string, style: "short" | "long" = "short", locale: Locale = "en"): string {
+  return new Intl.DateTimeFormat(intlLocale(locale), {
     timeZone: "UTC",
     month: "short",
     day: "numeric",
@@ -166,12 +169,16 @@ export function validateInvoice(invoice: Invoice, toleranceMinor = VAT_ROUNDING_
         message: `Net + VAT (${money(invoice.netMinor + invoice.vatMinor)}) differs from gross (${money(invoice.grossMinor)}) by ${money(Math.abs(sum.differenceMinor))}, above the ${money(toleranceMinor)} rounding tolerance.`
       });
     }
-    const expected = expectedVat(invoice.netMinor, invoice.vatRate);
-    if (Math.abs(invoice.vatMinor - expected) > toleranceMinor) {
-      issues.push({
-        code: "vat_rate_mismatch",
-        message: `VAT on the document (${money(invoice.vatMinor)}) does not match the stated ${VAT_RATE_LABEL[invoice.vatRate]} rate (expected ${money(expected)}).`
-      });
+    if (!(VAT_RATES as readonly string[]).includes(invoice.vatRate)) {
+      issues.push({ code: "invalid_vat_rate", message: `VAT rate ${String(invoice.vatRate)} is not a supported Polish VAT rate (23, 8, 5, 0, zw, np).` });
+    } else {
+      const expected = expectedVat(invoice.netMinor, invoice.vatRate);
+      if (Math.abs(invoice.vatMinor - expected) > toleranceMinor) {
+        issues.push({
+          code: "vat_rate_mismatch",
+          message: `VAT on the document (${money(invoice.vatMinor)}) does not match the stated ${VAT_RATE_LABEL[invoice.vatRate]} rate (expected ${money(expected)}).`
+        });
+      }
     }
   }
 

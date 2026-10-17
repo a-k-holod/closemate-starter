@@ -1,7 +1,10 @@
 /**
- * Reviewer decisions for the synthetic demo. Lives only in the browser's localStorage:
- * never sent to the server, Nicrron, PRISM or included in the accountant export.
+ * Reviewer decisions for the synthetic demo. Lives only in the browser's localStorage and is
+ * never sent to the server, Nicrron or PRISM. It reaches a file only when the user explicitly
+ * ticks "include reviewer decisions and notes" in the accountant export.
  */
+
+import type { Locale } from "./locale";
 
 export const REVIEW_STORAGE_VERSION = 1;
 export const REVIEW_STORAGE_KEY = `closemate:demo-review-state:v${REVIEW_STORAGE_VERSION}`;
@@ -74,15 +77,33 @@ export function undoReview(store: ReviewStore, invoiceId: string): ReviewStore {
   return withEntry(store, invoiceId, isBlank(restored) && history.length === 0 ? null : restored);
 }
 
-const DECISION_PHRASE: Record<ReviewDecision, string> = { reviewed: "marked reviewed", needs_review: "marked needs review" };
+const UNDO_COPY: Record<Locale, { reviewed: string; needs_review: string; cleared: string; edited: string; added: string; removed: string }> = {
+  en: {
+    reviewed: "marked reviewed",
+    needs_review: "marked needs review",
+    cleared: "decision cleared",
+    edited: "note edited",
+    added: "note added",
+    removed: "note removed"
+  },
+  pl: {
+    reviewed: "oznaczono jako sprawdzone",
+    needs_review: "oznaczono do weryfikacji",
+    cleared: "wyczyszczono decyzję",
+    edited: "zmieniono notatkę",
+    added: "dodano notatkę",
+    removed: "usunięto notatkę"
+  }
+};
 
 /** Short description of what Undo would revert, or null when there is nothing to undo. */
-export function describeUndo(entry: ReviewEntry): string | null {
+export function describeUndo(entry: ReviewEntry, locale: Locale = "en"): string | null {
   const previous = entry.history.at(-1);
   if (!previous) return null;
+  const copy = UNDO_COPY[locale] ?? UNDO_COPY.en;
   const parts: string[] = [];
-  if (previous.decision !== entry.decision) parts.push(entry.decision ? DECISION_PHRASE[entry.decision] : "decision cleared");
-  if (previous.note !== entry.note) parts.push(entry.note ? (previous.note ? "note edited" : "note added") : "note removed");
+  if (previous.decision !== entry.decision) parts.push(entry.decision ? copy[entry.decision] : copy.cleared);
+  if (previous.note !== entry.note) parts.push(entry.note ? (previous.note ? copy.edited : copy.added) : copy.removed);
   return parts.join(" + ") || null;
 }
 

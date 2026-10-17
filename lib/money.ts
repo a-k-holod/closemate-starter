@@ -1,3 +1,5 @@
+import { intlLocale, type Locale } from "./locale";
+
 export const CURRENCIES = ["PLN", "EUR", "USD"] as const;
 export type Currency = (typeof CURRENCIES)[number];
 
@@ -71,21 +73,26 @@ export function minorToDecimalString(amountMinor: MinorUnits, currency: Currency
   return `${amountMinor < 0 ? "-" : ""}${whole}${digits ? decimalSeparator + fraction : ""}`;
 }
 
-const formatters = new Map<Currency, Intl.NumberFormat>();
+const formatters = new Map<string, Intl.NumberFormat>();
 
-/** Formats minor units with an explicit ISO code, e.g. "PLN 1,476.00", "EUR 49.00". */
-export function formatMoney(amountMinor: MinorUnits, currency: Currency): string {
-  let formatter = formatters.get(currency);
+/**
+ * Formats minor units for display. The default locale stays en-US so existing
+ * totals keep their shape. Arithmetic always stays in integer minor units;
+ * this function never feeds a calculation.
+ */
+export function formatMoney(amountMinor: MinorUnits, currency: Currency, locale: Locale = "en"): string {
+  const key = `${locale}:${currency}`;
+  let formatter = formatters.get(key);
   if (!formatter) {
     const digits = MINOR_UNIT_DIGITS[currency];
-    formatter = new Intl.NumberFormat("en-US", {
+    formatter = new Intl.NumberFormat(intlLocale(locale), {
       style: "currency",
       currency,
       currencyDisplay: "code",
       minimumFractionDigits: digits,
       maximumFractionDigits: digits
     });
-    formatters.set(currency, formatter);
+    formatters.set(key, formatter);
   }
   return formatter.format(amountMinor / 10 ** MINOR_UNIT_DIGITS[currency]).replace(/[\u00a0\u202f]/g, " ");
 }
@@ -111,7 +118,7 @@ export function sumSameCurrency(items: readonly { amountMinor: MinorUnits; curre
 }
 
 /** Renders per-currency totals in a fixed PLN, EUR, USD order, e.g. "PLN 1,157.49 · EUR 49.00". */
-export function formatCurrencyTotals(totals: CurrencyTotals, emptyText = "—"): string {
-  const parts = CURRENCIES.filter((c) => totals[c] !== undefined).map((c) => formatMoney(totals[c]!, c));
+export function formatCurrencyTotals(totals: CurrencyTotals, emptyText = "—", locale: Locale = "en"): string {
+  const parts = CURRENCIES.filter((c) => totals[c] !== undefined).map((c) => formatMoney(totals[c]!, c, locale));
   return parts.length ? parts.join(" · ") : emptyText;
 }
