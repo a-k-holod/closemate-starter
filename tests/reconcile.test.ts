@@ -323,3 +323,74 @@ describe("legacy behaviour regression (original six-invoice USD dataset)", () =>
     expect(legacy[3].matchedPayments.reduce((sum, p) => sum + p.amountMinor, 0)).toBe(150000);
   });
 });
+
+describe("one payment settles at most one invoice", () => {
+  it("does not let one generic transfer match two same-vendor invoices with the same gross", () => {
+    const [a, b] = run(
+      [invoice({ id: "INV-3001", number: "FV/1" }), invoice({ id: "INV-3002", number: "FV/2" })],
+      [payment({ id: "P1", amountMinor: 123000, reference: "monthly fee" })]
+    );
+    for (const r of [a, b]) {
+      expect(r.status).toBe("needs_review");
+      expect(r.reviewReasons.map((x) => x.code)).toContain("shared_payment");
+      expect(r.matchedPayments).toEqual([]);
+      expect(r.due.state).not.toBe("settled");
+    }
+  });
+
+  it("still matches when each invoice has its own exact payment", () => {
+    const [a, b] = run(
+      [invoice({ id: "INV-3001", number: "FV/2026/001" }), invoice({ id: "INV-3002", number: "FV/2026/002" })],
+      [payment({ id: "P1", amountMinor: 123000, reference: "FV/2026/001" }), payment({ id: "P2", amountMinor: 123000, reference: "FV/2026/002" })]
+    );
+    expect([a.status, b.status]).toEqual(["matched", "matched"]);
+    expect(a.matchedPayments.map((p) => p.id)).toEqual(["P1"]);
+    expect(b.matchedPayments.map((p) => p.id)).toEqual(["P2"]);
+  });
+
+  it("does not reuse another invoice's exact payment as a partial-payment candidate", () => {
+    const [a, b] = run(
+      [invoice({ id: "INV-3001", number: "FV/1" }), invoice({ id: "INV-3002", number: "FV/2", netMinor: 50000, vatMinor: 11500, grossMinor: 61500 })],
+      [payment({ id: "P1", amountMinor: 123000, reference: "monthly fee" })]
+    );
+    expect(a.status).toBe("matched");
+    expect(b.status).toBe("missing_payment");
+    expect(b.matchedPayments).toEqual([]);
+  });
+});
+
+describe("invalid invoice data always wins over a matching payment", () => {
+  it.each([
+    ["invalid NIP", { vendorNip: "0000000018" }, "invalid_nip"],
+    ["missing NIP for a Polish vendor", { vendorNip: null }, "missing_nip"],
+    ["due before issue", { issuedAt: "2026-10-10", dueAt: "2026-10-01" }, "due_before_issue"],
+    ["impossible date", { dueAt: "2026-02-30" }, "invalid_date"],
+    ["net + VAT ≠ gross", { grossMinor: 123002 }, "vat_sum_mismatch"],
+    ["VAT does not match the rate", { vatRate: "8" as const }, "vat_rate_mismatch"],
+    ["unknown VAT rate", { vatRate: "17" as never }, "invalid_vat_rate"]
+  ])("%s", (_label, overrides, code) => {
+    const inv = invoice({ id: "INV-3101", ...overrides });
+    const r = one(inv, [payment({ id: "P1", amountMinor: inv.grossMinor })]);
+    expect(r.status).toBe("needs_review");
+    expect(r.reviewReasons.map((x) => x.code)).toContain(code);
+  });
+
+  it("detects duplicate invoice numbers even when the NIP is formatted differently", () => {
+    const r = run(
+      [invoice({ id: "INV-3201", number: "FV/9", vendorNip: "0000000017" }), invoice({ id: "INV-3202", number: "FV/9", vendorNip: "PL 000-000-00-17" })],
+      []
+    );
+    for (const x of r) expect(x.reviewReasons.map((y) => y.code)).toContain("duplicate_invoice_number");
+  });
+});
+
+describe("currencies", () => {
+  it("never matches an equal amount in a different currency", () => {
+    const r = one(invoice({ id: "INV-3301", currency: "EUR", vatMinor: 0, netMinor: 4900, grossMinor: 4900, vatRate: "np", vendorCountry: "IE", vendorNip: null }), [
+      payment({ id: "PLN", amountMinor: 4900, currency: "PLN" })
+    ]);
+    expect(r.status).toBe("needs_review");
+    expect(r.matchedPayments).toEqual([]);
+    expect(r.crossCurrencyPayments.map((p) => p.id)).toEqual(["PLN"]);
+  });
+});

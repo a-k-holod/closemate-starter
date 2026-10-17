@@ -2,30 +2,27 @@
 
 import { useId, useState } from "react";
 import type { ReviewQueueState } from "@/lib/invoice-review";
+import type { Locale } from "@/lib/locale";
+import type { Messages } from "@/lib/messages";
 import { describeUndo, REVIEW_NOTE_MAX_LENGTH, normalizeReviewNote, type ReviewDecision, type ReviewEntry, type ReviewPatch } from "@/lib/review-state";
 import type { ReviewStorageStatus } from "@/lib/use-review-store";
 
-export const REVIEW_QUEUE_LABEL: Record<ReviewQueueState, string> = {
-  reviewed: "Reviewed",
-  flagged: "Flagged for review",
-  awaiting: "Awaiting review",
-  not_required: "No review required"
-};
-
-function formatSavedAt(iso: string) {
-  return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(iso));
+function formatSavedAt(iso: string, locale: Locale) {
+  return new Intl.DateTimeFormat(locale === "pl" ? "pl-PL" : "en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(new Date(iso));
 }
 
 type ReviewPanelProps = {
   entry: ReviewEntry;
   queueState: ReviewQueueState;
   storageStatus: ReviewStorageStatus;
+  locale: Locale;
+  t: Messages;
   onUpdate: (patch: ReviewPatch) => void;
   onUndo: () => void;
 };
 
 /** Render with key={invoiceId} so the note draft resets when the reviewer switches invoices. */
-export function ReviewPanel({ entry, queueState, storageStatus, onUpdate, onUndo }: ReviewPanelProps) {
+export function ReviewPanel({ entry, queueState, storageStatus, locale, t, onUpdate, onUndo }: ReviewPanelProps) {
   const id = useId();
   const [draft, setDraft] = useState(entry.note);
   const [syncedNote, setSyncedNote] = useState(entry.note);
@@ -36,7 +33,7 @@ export function ReviewPanel({ entry, queueState, storageStatus, onUpdate, onUndo
 
   const loading = storageStatus === "loading";
   const dirty = normalizeReviewNote(draft) !== entry.note;
-  const undoLabel = describeUndo(entry);
+  const undoLabel = describeUndo(entry, locale);
 
   function decide(decision: ReviewDecision) {
     onUpdate({ decision: entry.decision === decision ? null : decision, ...(dirty ? { note: draft } : {}) });
@@ -46,33 +43,33 @@ export function ReviewPanel({ entry, queueState, storageStatus, onUpdate, onUndo
     <section className="review-card" aria-labelledby={`${id}-title`} aria-busy={loading}>
       <div className="review-card-head">
         <div>
-          <strong id={`${id}-title`}>Reviewer decision</strong>
-          <small>{storageStatus === "unavailable" ? "Not saved · storage blocked in this browser" : "Saved only in this browser"}</small>
+          <strong id={`${id}-title`}>{t.review.title}</strong>
+          <small>{storageStatus === "unavailable" ? t.review.notSaved : t.review.savedHere}</small>
         </div>
-        {!loading && <span className={`review-state review-state-${queueState}`}>{REVIEW_QUEUE_LABEL[queueState]}</span>}
+        {!loading && <span className={`review-state review-state-${queueState}`}>{t.queue[queueState]}</span>}
       </div>
 
       {loading ? (
-        <p className="review-loading" role="status"><span className="spinner spinner-dark" aria-hidden="true" /> Loading saved review decisions…</p>
+        <p className="review-loading" role="status"><span className="spinner spinner-dark" aria-hidden="true" /> {t.review.loading}</p>
       ) : (
         <>
-          <div className="review-decisions" role="group" aria-label="Review decision">
+          <div className="review-decisions" role="group" aria-label={t.review.decision}>
             <button type="button" className="review-toggle review-toggle-reviewed" aria-pressed={entry.decision === "reviewed"} onClick={() => decide("reviewed")}>
-              <span aria-hidden="true">✓</span> Mark reviewed
+              <span aria-hidden="true">✓</span> {t.review.markReviewed}
             </button>
             <button type="button" className="review-toggle review-toggle-flagged" aria-pressed={entry.decision === "needs_review"} onClick={() => decide("needs_review")}>
-              <span aria-hidden="true">⚑</span> Needs review
+              <span aria-hidden="true">⚑</span> {t.review.needsReview}
             </button>
           </div>
 
-          <label className="review-note-label" htmlFor={`${id}-note`}>Reviewer note <span>optional</span></label>
+          <label className="review-note-label" htmlFor={`${id}-note`}>{t.review.note} <span>{t.review.optional}</span></label>
           <textarea
             id={`${id}-note`}
             className="review-note"
             rows={2}
             maxLength={REVIEW_NOTE_MAX_LENGTH}
             value={draft}
-            placeholder="e.g. Asked vendor for a correction invoice"
+            placeholder={t.review.placeholder}
             aria-describedby={`${id}-note-help`}
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => {
@@ -84,14 +81,14 @@ export function ReviewPanel({ entry, queueState, storageStatus, onUpdate, onUndo
           />
           <div className="review-note-foot">
             <span id={`${id}-note-help`}>
-              {dirty ? "Unsaved changes · ⌘/Ctrl + Enter to save" : entry.updatedAt ? `Last change ${formatSavedAt(entry.updatedAt)}` : "Never sent to CloseMate AI, Nicrron or PRISM"}
+              {dirty ? t.review.unsaved : entry.updatedAt ? t.review.lastChange(formatSavedAt(entry.updatedAt, locale)) : t.review.neverSent}
             </span>
             <span aria-hidden="true">{draft.length}/{REVIEW_NOTE_MAX_LENGTH}</span>
           </div>
 
           <div className="review-card-actions">
-            <button type="button" className="button button-secondary" disabled={!dirty} onClick={() => onUpdate({ note: draft })}>Save note</button>
-            {undoLabel && <button type="button" className="ghost-button review-undo" onClick={onUndo}>↶ Undo: {undoLabel}</button>}
+            <button type="button" className="button button-secondary" disabled={!dirty} onClick={() => onUpdate({ note: draft })}>{t.review.save}</button>
+            {undoLabel && <button type="button" className="ghost-button review-undo" onClick={onUndo}>↶ {t.review.undo(undoLabel)}</button>}
           </div>
         </>
       )}

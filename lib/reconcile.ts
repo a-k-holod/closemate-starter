@@ -1,5 +1,5 @@
 import { DEMO_AS_OF, demoBankPayments, demoInvoices } from "./demo-data";
-import { daysBetween, formatDate, validateInvoice, VAT_ROUNDING_TOLERANCE_MINOR, type BankPayment, type Invoice, type ValidationIssueCode } from "./invoice";
+import { daysBetween, normalizeNip, validateInvoice, VAT_ROUNDING_TOLERANCE_MINOR, type BankPayment, type Invoice, type ValidationIssueCode } from "./invoice";
 import { formatMoney, sumSameCurrency, type MinorUnits } from "./money";
 
 export type { BankPayment, Invoice } from "./invoice";
@@ -10,7 +10,8 @@ export type ReconciliationStatus = "matched" | "amount_mismatch" | "missing_paym
 
 export const RECONCILIATION_STATUSES: readonly ReconciliationStatus[] = ["matched", "amount_mismatch", "missing_payment", "possible_duplicate", "needs_review"];
 
-export type ReviewReason = { code: ValidationIssueCode | "cross_currency_payment"; message: string };
+export type ReviewReasonCode = ValidationIssueCode | "cross_currency_payment" | "shared_payment";
+export type ReviewReason = { code: ReviewReasonCode; message: string };
 
 /** "settled" means bank evidence covers the gross amount; it says nothing about tax treatment. */
 export type DueState = "settled" | "not_due" | "due_today" | "overdue";
@@ -80,7 +81,7 @@ function duplicateInvoiceKeys(invoices: readonly Invoice[]): Set<string> {
 }
 
 function invoiceKey(invoice: Invoice): string {
-  return `${invoice.vendorNip ?? normalize(invoice.vendor)}|${normalize(invoice.number)}`;
+  return `${invoice.vendorNip ? normalizeNip(invoice.vendorNip) : normalize(invoice.vendor)}|${normalize(invoice.number)}`;
 }
 
 export function dueInfo(invoice: Invoice, status: ReconciliationStatus, asOf: string): DueInfo {
@@ -100,17 +101,41 @@ export function reconcile(invoicesInput: Invoice[], paymentsInput: BankPayment[]
   const tolerance = options.toleranceMinor ?? VAT_ROUNDING_TOLERANCE_MINOR;
   const duplicateKeys = duplicateInvoiceKeys(invoicesInput);
 
-  return invoicesInput.map((invoice) => {
+  const linked = invoicesInput.map((invoice) => {
+    const related = paymentsInput.filter((payment) => relatedTo(invoice, payment, invoicesInput));
+    return {
+      invoice,
+      sameCurrency: related.filter((payment) => payment.currency === invoice.currency),
+      crossCurrencyPayments: related.filter((payment) => payment.currency !== invoice.currency)
+    };
+  });
+  // One bank payment can settle at most one invoice: count how many invoices each payment matches exactly.
+  const exactClaims = new Map<BankPayment, number>();
+  for (const { invoice, sameCurrency } of linked) {
+    for (const payment of sameCurrency) {
+      if (payment.amountMinor === invoice.grossMinor) exactClaims.set(payment, (exactClaims.get(payment) ?? 0) + 1);
+    }
+  }
+
+  return linked.map(({ invoice, sameCurrency, crossCurrencyPayments }) => {
     const { currency, grossMinor } = invoice;
     const money = (amountMinor: MinorUnits) => formatMoney(amountMinor, currency);
-    const related = paymentsInput.filter((payment) => relatedTo(invoice, payment, invoicesInput));
-    const candidates = related.filter((payment) => payment.currency === currency);
-    const crossCurrencyPayments = related.filter((payment) => payment.currency !== currency);
+    const isExact = (payment: BankPayment) => payment.amountMinor === grossMinor;
+    // A payment that exactly matches another invoice is that invoice's evidence, not a partial payment of this one.
+    const available = sameCurrency.filter((payment) => isExact(payment) || !exactClaims.has(payment));
+    const shared = available.filter((payment) => isExact(payment) && (exactClaims.get(payment) ?? 0) > 1);
+    const candidates = available.filter((payment) => !shared.includes(payment));
     const total = (payments: BankPayment[]) => sumSameCurrency(payments, currency);
 
     const reviewReasons: ReviewReason[] = validateInvoice(invoice, tolerance);
     if (duplicateKeys.has(invoiceKey(invoice))) {
       reviewReasons.push({ code: "duplicate_invoice_number", message: `Invoice number ${invoice.number} from this vendor is recorded more than once.` });
+    }
+    if (shared.length > 0) {
+      reviewReasons.push({
+        code: "shared_payment",
+        message: `Bank payment ${shared.map((p) => p.id).join(", ")} exactly matches more than one invoice, so it is not counted for any of them until a person assigns it.`
+      });
     }
 
     const build = (status: ReconciliationStatus, matchedPayments: BankPayment[], explanation: string): ReconciliationResult => ({
@@ -155,39 +180,4 @@ export const invoices = demoInvoices;
 export const payments = demoBankPayments;
 export const results = reconcile(invoices, payments, { asOf: DEMO_AS_OF });
 
-function dueSentence(result: ReconciliationResult): string {
-  const { due, invoice } = result;
-  const dueDate = formatDate(invoice.dueAt, "long");
-  if (due.state === "overdue") return ` It is ${due.daysPastDue} day${due.daysPastDue === 1 ? "" : "s"} past its ${dueDate} due date.`;
-  if (due.state === "due_today") return ` It is due today (${dueDate}).`;
-  if (due.state === "not_due") return ` It is not yet due (${dueDate}).`;
-  return "";
-}
-
-/** Deterministic, rule-based explanation. Describes evidence only; makes no tax determinations. */
-export function demoExplanation(result: ReconciliationResult): string {
-  const { invoice } = result;
-  const amount = (value: MinorUnits) => formatMoney(value, invoice.currency);
-  const paymentsTotal = sumSameCurrency(result.matchedPayments, invoice.currency);
-  switch (result.status) {
-    case "amount_mismatch": {
-      const payment = result.matchedPayments[0];
-      const absoluteDelta = Math.abs(result.deltaMinor);
-      const direction = result.deltaMinor > 0 ? "higher" : "lower";
-      const netHint = payment && payment.amountMinor === invoice.netMinor && invoice.vatMinor > 0
-        ? ` The transfer equals the invoice net amount, so the ${amount(invoice.vatMinor)} VAT portion may not have been paid.`
-        : "";
-      return `${invoice.id} needs review: the invoice gross is ${amount(invoice.grossMinor)}, while ${payment?.id ?? "the candidate payment"} is ${amount(payment?.amountMinor ?? 0)} (${amount(absoluteDelta)} ${direction}).${netHint}${dueSentence(result)} Keep this item open and check for a partial payment, a correction invoice, or a bank fee before approving any adjustment. No payment or refund has been initiated.`;
-    }
-    case "missing_payment":
-      return `No matching bank payment was found for ${invoice.vendor} (${invoice.number}, ${amount(invoice.grossMinor)}).${dueSentence(result)} Check whether the payment is still pending, posted under a different counterparty name, or missing from the imported statement. Do not mark it paid without evidence.`;
-    case "possible_duplicate":
-      return `${result.matchedPayments.length} separate payments reference ${invoice.number}. The invoice gross is ${amount(invoice.grossMinor)} but the candidate payments total ${amount(paymentsTotal)} (${amount(result.deltaMinor)} extra). Verify the transactions against the bank statement and the vendor before requesting a refund or offsetting a future invoice.`;
-    case "needs_review": {
-      const reasons = result.reviewReasons.map((r) => r.message).join(" ");
-      return `${invoice.id} is held for manual review and has not been matched. ${reasons}${dueSentence(result)} Confirm the document with the vendor or your accountant before relying on it in the close.`;
-    }
-    case "matched":
-      return `${invoice.id} is matched: invoice gross and bank payment agree at ${amount(invoice.grossMinor)}. Keep the bank transaction reference as the payment evidence.`;
-  }
-}
+export { demoExplanation } from "./explanations";

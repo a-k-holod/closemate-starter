@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   ACCOUNTANT_CSV_HEADERS,
   CSV_BOM,
+  REVIEWER_CSV_HEADERS,
+  accountantCsvHeaders,
   accountantExportFilename,
+  type AccountantCsvHeader,
   buildAccountantCsv,
   createAccountantExport,
   escapeCsvField,
@@ -79,7 +82,7 @@ describe("CSV format", () => {
     const csv = buildAccountantCsv([]);
     expect(new TextEncoder().encode(csv).slice(0, 3)).toEqual(new Uint8Array([0xef, 0xbb, 0xbf]));
     expect(csv).toBe(
-      `${CSV_BOM}Nr faktury;Dostawca;NIP dostawcy;Data wystawienia;Termin płatności;Netto;VAT;Brutto;Waluta;Kategoria;Status uzgodnienia;ID transakcji;Różnica;Status weryfikacji;Notatki\r\n`
+      `${CSV_BOM}Nr faktury;Dostawca;NIP dostawcy;Data wystawienia;Termin płatności;Netto;VAT;Brutto;Waluta;Kategoria;Status uzgodnienia (automatyczny);ID transakcji;Różnica (płatności - brutto);Wymaga przeglądu (reguły);Uwagi systemowe\r\n`
     );
   });
 
@@ -101,26 +104,27 @@ describe("CSV format", () => {
     expect(matched[column("Kategoria")]).toBe("Hosting i chmura");
 
     const mismatch = rowFor("INV-2102");
-    expect(mismatch[column("Status uzgodnienia")]).toBe("Niezgodność kwoty");
-    expect(mismatch[column("Różnica")]).toBe("-138,00");
+    expect(mismatch[column("Status uzgodnienia (automatyczny)")]).toBe("Niezgodność kwoty");
+    expect(mismatch[column("Różnica (płatności - brutto)")]).toBe("-138,00");
     expect(mismatch[column("ID transakcji")]).toBe("TXN-9102");
-    expect(mismatch[column("Notatki")]).toBe("Overdue by 2 days.");
+    expect(mismatch[column("Uwagi systemowe")]).toBe("Overdue by 2 days.");
 
     const missing = rowFor("INV-2105");
-    expect(missing[column("Różnica")]).toBe("-1845,00");
-    expect(missing[column("Status weryfikacji")]).toBe("Do weryfikacji");
+    expect(missing[column("Różnica (płatności - brutto)")]).toBe("-1845,00");
+    expect(missing[column("Wymaga przeglądu (reguły)")]).toBe("Tak");
+    expect(matched[column("Wymaga przeglądu (reguły)")]).toBe("Nie");
 
     const duplicate = rowFor("INV-2104");
     expect(duplicate[column("ID transakcji")]).toBe("TXN-9103, TXN-9104");
-    expect(duplicate[column("Różnica")]).toBe("1476,00");
+    expect(duplicate[column("Różnica (płatności - brutto)")]).toBe("1476,00");
 
     const eur = rowFor("INV-2106");
     expect(eur[column("Waluta")]).toBe("EUR");
     expect(eur[column("NIP dostawcy")]).toBe("");
 
     const review = rowFor("INV-2108");
-    expect(review[column("Status uzgodnienia")]).toBe("Do ręcznej weryfikacji");
-    expect(review[column("Notatki")]).toContain("differs from gross (PLN 1,232.00) by PLN 2.00");
+    expect(review[column("Status uzgodnienia (automatyczny)")]).toBe("Do ręcznej weryfikacji");
+    expect(review[column("Uwagi systemowe")]).toContain("differs from gross (PLN 1,232.00) by PLN 2.00");
   });
 });
 
@@ -138,7 +142,7 @@ describe("escaping", () => {
     const message = 'Uwaga; "pilne"\nDruga linia\r\nTrzecia';
     const [row] = dataRows(buildAccountantCsv([makeResult({ vendor: "A;B \"C\"" }, { reviewReasons: [{ code: "invalid_nip", message }] })]));
     expect(row[column("Dostawca")]).toBe('A;B "C"');
-    expect(row[column("Notatki")]).toBe(message);
+    expect(row[column("Uwagi systemowe")]).toBe(message);
   });
 });
 
@@ -149,7 +153,7 @@ describe("Polish characters", () => {
     const [row] = dataRows(csv);
     expect(row[column("Dostawca")]).toBe(vendor);
     expect(row[column("Kategoria")]).toBe("Biuro rachunkowe");
-    expect(row[column("Notatki")]).toBe("Źródło: ćwiczenie");
+    expect(row[column("Uwagi systemowe")]).toBe("Źródło: ćwiczenie");
     expect(new TextDecoder("utf-8", { ignoreBOM: true }).decode(new TextEncoder().encode(csv))).toBe(csv);
   });
 });
@@ -163,7 +167,7 @@ describe("formula injection", () => {
     const [row] = dataRows(buildAccountantCsv([makeResult({ number: "=1", vendor: "+1+cmd" }, { reviewReasons: [{ code: "invalid_nip", message: "=IMPORTXML()" }] })]));
     expect(row[column("Nr faktury")]).toBe("'=1");
     expect(row[column("Dostawca")]).toBe("'+1+cmd");
-    expect(row[column("Notatki")]).toBe("'=IMPORTXML()");
+    expect(row[column("Uwagi systemowe")]).toBe("'=IMPORTXML()");
   });
 
   it("keeps legitimate signed amounts as numbers", () => {
@@ -171,7 +175,7 @@ describe("formula injection", () => {
     expect(serializeCsvCell("-12,50")).toBe("-12,50");
     expect(serializeCsvCell("+48")).toBe("+48");
     const [row] = dataRows(buildAccountantCsv([makeResult({}, { status: "missing_payment", deltaMinor: -12300 })]));
-    expect(row[column("Różnica")]).toBe("-123,00");
+    expect(row[column("Różnica (płatności - brutto)")]).toBe("-123,00");
   });
 
   it("leaves ordinary text and NIP numbers untouched", () => {
@@ -227,7 +231,7 @@ describe("multiple currencies", () => {
 describe("blank values", () => {
   it("writes empty cells for missing optional fields instead of placeholders", () => {
     const [row] = dataRows(buildAccountantCsv([makeResult()]));
-    for (const name of ["NIP dostawcy", "ID transakcji", "Notatki"] as const) expect(row[column(name)]).toBe("");
+    for (const name of ["NIP dostawcy", "ID transakcji", "Uwagi systemowe"] as const) expect(row[column(name)]).toBe("");
     expect(row[column("Brutto")]).toBe("123,00");
     expect(buildAccountantCsv(results)).not.toMatch(/undefined|null|NaN/);
   });
@@ -269,6 +273,10 @@ describe("empty exports and filenames", () => {
     expect(accountantExportFilename(date, "filtered")).toBe("closemate_eksport-dla-ksiegowego_2026-10-07_filtrowane.csv");
   });
 
+  it("marks filenames that contain local reviewer notes", () => {
+    expect(accountantExportFilename(date, null, true)).toBe("closemate_eksport-dla-ksiegowego_2026-10-07_wszystkie_z-notatkami-recenzenta.csv");
+  });
+
   it("builds a complete export for non-empty records with per-currency totals", () => {
     const filtered = results.filter((r) => r.status === "matched");
     const result = createAccountantExport(filtered, { date, statusFilter: "matched" });
@@ -281,5 +289,65 @@ describe("empty exports and filenames", () => {
       { currency: "PLN", count: 2, grossMinor: 115749 },
       { currency: "EUR", count: 1, grossMinor: 4900 }
     ]);
+  });
+});
+
+describe("automatic status versus human review", () => {
+  it("never labels a record as confirmed or approved when no human decision exists", () => {
+    const csv = buildAccountantCsv(results);
+    expect(csv).not.toMatch(/Potwierdzon|Zatwierdzon|Sprawdzona/);
+    expect(csv).not.toContain(REVIEWER_CSV_HEADERS[0]);
+  });
+
+  it("labels the reconciliation column as automatic", () => {
+    expect(ACCOUNTANT_CSV_HEADERS).toContain("Status uzgodnienia (automatyczny)");
+    expect(ACCOUNTANT_CSV_HEADERS).not.toContain("Status weryfikacji" as never);
+  });
+});
+
+describe("local reviewer decisions and notes", () => {
+  const store = {
+    "INV-2101": { decision: "reviewed" as const, note: "Sprawdzone z wyciągiem — OK", updatedAt: "2026-10-17T10:00:00.000Z", history: [] },
+    "INV-2102": { decision: "needs_review" as const, note: "=HYPERLINK(\"http://evil\";\"klik\")", updatedAt: "2026-10-17T10:00:00.000Z", history: [] }
+  };
+  const reviewColumn = (name: AccountantCsvHeader) => accountantCsvHeaders({ review: store }).indexOf(name);
+
+  it("are excluded by default", () => {
+    const csv = buildAccountantCsv(results);
+    expect(csv).not.toContain("Sprawdzone z wyciągiem");
+    expect(csv).not.toContain("HYPERLINK");
+    for (const row of dataRows(csv)) expect(row).toHaveLength(ACCOUNTANT_CSV_HEADERS.length);
+  });
+
+  it("are appended in clearly labelled local-only columns when explicitly requested", () => {
+    const rows = dataRows(buildAccountantCsv(results, { review: store }));
+    const header = parseCsv(buildAccountantCsv([], { review: store }).slice(CSV_BOM.length))[0];
+    expect(header.slice(-2)).toEqual(["Decyzja recenzenta (zapis lokalny)", "Notatka recenzenta (zapis lokalny)"]);
+    const byId = (id: string) => rows[results.findIndex((r) => r.invoice.id === id)];
+    expect(byId("INV-2101")[reviewColumn("Decyzja recenzenta (zapis lokalny)")]).toBe("Oznaczona jako sprawdzona");
+    expect(byId("INV-2101")[reviewColumn("Notatka recenzenta (zapis lokalny)")]).toBe("Sprawdzone z wyciągiem — OK");
+    expect(byId("INV-2102")[reviewColumn("Decyzja recenzenta (zapis lokalny)")]).toBe("Oznaczona do weryfikacji");
+    expect(byId("INV-2105")[reviewColumn("Decyzja recenzenta (zapis lokalny)")]).toBe("Brak decyzji");
+    expect(byId("INV-2105")[reviewColumn("Notatka recenzenta (zapis lokalny)")]).toBe("");
+    for (const row of rows) expect(row).toHaveLength(ACCOUNTANT_CSV_HEADERS.length + 2);
+  });
+
+  it("neutralises formulas typed into reviewer notes", () => {
+    const rows = dataRows(buildAccountantCsv(results, { review: store }));
+    const note = rows[results.findIndex((r) => r.invoice.id === "INV-2102")][reviewColumn("Notatka recenzenta (zapis lokalny)")];
+    expect(note.startsWith("'=")).toBe(true);
+  });
+
+  it("reports whether the export contains reviewer notes", () => {
+    const withNotes = createAccountantExport(results, { date: new Date(2026, 9, 17), statusFilter: null, review: store });
+    const without = createAccountantExport(results, { date: new Date(2026, 9, 17), statusFilter: null });
+    expect(withNotes.ok && withNotes.includesReviewerNotes).toBe(true);
+    expect(without.ok && without.includesReviewerNotes).toBe(false);
+  });
+});
+
+describe("additional formula-injection vectors", () => {
+  it.each(["\uff1dSUM(A1)", "\uff0b1", "\n=1"])("neutralises %j", (value) => {
+    expect(serializeCsvCell(value).replace(/^"/, "").startsWith("'")).toBe(true);
   });
 });

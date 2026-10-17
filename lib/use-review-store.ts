@@ -12,7 +12,11 @@ import {
 /** "loading" until the first client effect runs, so server and first client render always agree. */
 export type ReviewStorageStatus = "loading" | "ready" | "unavailable";
 
-export type ReviewStorageProblem = { tone: "warning" | "error"; text: string };
+export type ReviewStorageProblem =
+  | { tone: "warning"; code: "unreadable" }
+  | { tone: "warning"; code: "dropped"; count: number }
+  | { tone: "error"; code: "blocked" }
+  | { tone: "error"; code: "save_failed" };
 
 function openStorage(): Storage | null {
   try {
@@ -31,13 +35,13 @@ function describeLoad(raw: string | null, knownInvoiceIds: ReadonlySet<string>):
   if (parsed.status === "invalid") {
     return {
       store: parsed.store,
-      problem: { tone: "warning", text: "Saved review decisions in this browser could not be read (corrupted or from another version), so they were ignored. Your next change will replace them." }
+      problem: { tone: "warning", code: "unreadable" }
     };
   }
   if (parsed.droppedEntries > 0) {
     return {
       store: parsed.store,
-      problem: { tone: "warning", text: `${parsed.droppedEntries} saved review ${parsed.droppedEntries === 1 ? "entry was" : "entries were"} unreadable or for invoices no longer in the demo, and ${parsed.droppedEntries === 1 ? "was" : "were"} skipped.` }
+      problem: { tone: "warning", code: "dropped", count: parsed.droppedEntries }
     };
   }
   return { store: parsed.store, problem: null };
@@ -55,7 +59,7 @@ export function useReviewStore(knownInvoiceIds: ReadonlySet<string>) {
     storageRef.current = storage;
     if (!storage) {
       setStatus("unavailable");
-      setProblem({ tone: "error", text: "This browser is blocking local storage (private mode or site-data settings). Review decisions will work but are lost when you reload the page." });
+      setProblem({ tone: "error", code: "blocked" });
       return;
     }
     const load = () => {
@@ -90,7 +94,7 @@ export function useReviewStore(knownInvoiceIds: ReadonlySet<string>) {
       else storage.setItem(REVIEW_STORAGE_KEY, serializeReviewStore(next));
       setProblem(null);
     } catch {
-      setProblem({ tone: "error", text: "Could not save to this browser's storage (it may be full or blocked). Your latest change is kept only until you reload." });
+      setProblem({ tone: "error", code: "save_failed" });
     }
     return true;
   }, []);
